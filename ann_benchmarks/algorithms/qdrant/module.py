@@ -187,7 +187,8 @@ class Qdrant(BaseANN):
                 ),
                 timeout=TIMEOUT,
             )
-            self.batch_latencies.extend([time() - start] * len(request_batch))
+            duration = time() - start
+            self.batch_latencies.extend([duration / len(request_batch)] * len(request_batch))
 
             for r in grpc_res.result:
                 self.batch_results.append([hit.id.num for hit in r.result])
