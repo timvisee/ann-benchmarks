@@ -5,22 +5,26 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client import grpc
 from qdrant_client.http.models import (
-    CollectionStatus,
-    Distance,
-    VectorParams,
-    OptimizersConfigDiff,
-    ScalarQuantization,
-    ScalarQuantizationConfig,
     BinaryQuantization,
     BinaryQuantizationConfig,
-    ScalarType,
+    CollectionStatus,
+    Distance,
     HnswConfigDiff,
+    OptimizersConfigDiff,
+    QuantizationSearchParams,
+    QueryRequest,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
+    SearchParams,
+    VectorParams,
 )
 
 from ..base.module import BaseANN
 
 TIMEOUT = 30
 BATCH_SIZE = 128
+QUERY_BATCH_SIZE = 24 * 10
 
 
 class Qdrant(BaseANN):
@@ -66,22 +70,17 @@ class Qdrant(BaseANN):
 
         # Disabling indexing during bulk upload
         # https://qdrant.tech/documentation/tutorials/bulk-upload/#disable-indexing-during-upload
-        # Uploading to multiple shards
-        # https://qdrant.tech/documentation/tutorials/bulk-upload/#parallel-upload-into-multiple-shards
         self._client.recreate_collection(
             collection_name=self._collection_name,
-            shard_number=2,
             vectors_config=VectorParams(size=X.shape[1], distance=self._distances_mapping[self._metric]),
             optimizers_config=OptimizersConfigDiff(
                 default_segment_number=2,
-                memmap_threshold=20000,
-                indexing_threshold=0,
             ),
             quantization_config=quantization_config,
-            # TODO: benchmark this as well
             hnsw_config=HnswConfigDiff(
                 ef_construct=self._ef_construct,
-                m=self._m,
+                # zero to not build HNSW during ingestion, we set m after upload
+                m=0,
             ),
             timeout=TIMEOUT,
         )
@@ -94,24 +93,21 @@ class Qdrant(BaseANN):
             parallel=1,
         )
 
-        # Re-enabling indexing
+        # Re-enabling indexing by setting proper HNSW m value
         self._client.update_collection(
             collection_name=self._collection_name,
-            optimizers_config=OptimizersConfigDiff(
-                indexing_threshold=20000,
+            hnsw_config=HnswConfigDiff(
+                ef_construct=self._ef_construct,
+                m=self._m,
             ),
             timeout=TIMEOUT,
         )
 
-        # wait for vectors to be fully indexed
-        SECONDS_WAITING_FOR_INDEXING_API_CALL = 5
-
+        # Wait for vectors to be fully indexed
+        SECONDS_WAITING_FOR_INDEXING_API_CALL = 2
+        print(f"Waiting for collection {self._collection_name} to be indexed...")
         while True:
             sleep(SECONDS_WAITING_FOR_INDEXING_API_CALL)
-            collection_info = self._client.get_collection(self._collection_name)
-            if collection_info.status != CollectionStatus.GREEN:
-                continue
-            sleep(SECONDS_WAITING_FOR_INDEXING_API_CALL)  # the flag is sometimes flacky, better double check
             collection_info = self._client.get_collection(self._collection_name)
             if collection_info.status == CollectionStatus.GREEN:
                 print(f"Stored vectors: {collection_info.vectors_count}")
@@ -124,23 +120,21 @@ class Qdrant(BaseANN):
         self._search_params["rescore"] = rescore
 
     def query(self, q, n):
-        search_request = grpc.SearchPoints(
+        search_result = self._client.query_points(
             collection_name=self._collection_name,
-            vector=q.tolist(),
+            query=q.tolist(),
+            with_payload=False,
+            with_vectors=False,
             limit=n,
-            with_payload=grpc.WithPayloadSelector(enable=False),
-            with_vectors=grpc.WithVectorsSelector(enable=False),
-            params=grpc.SearchParams(
+            search_params=SearchParams(
                 hnsw_ef=self._search_params["hnsw_ef"],
-                quantization=grpc.QuantizationSearchParams(
+                quantization=QuantizationSearchParams(
                     ignore=False,
                     rescore=self._search_params["rescore"],
                 ),
             ),
         )
-
-        search_result = self._client.grpc_points.Search(search_request, timeout=TIMEOUT)
-        result_ids = [point.id.num for point in search_result.result]
+        result_ids = [point.id for point in search_result.points]
         return result_ids
 
     def batch_query(self, X, n):
@@ -155,19 +149,18 @@ class Qdrant(BaseANN):
             if batch:
                 yield batch
 
-        quantization_search_params = grpc.QuantizationSearchParams(
+        quantization_search_params = QuantizationSearchParams(
             ignore=False,
             rescore=self._search_params["rescore"],
         )
 
         search_queries = [
-            grpc.SearchPoints(
-                collection_name=self._collection_name,
-                vector=q.tolist(),
+            QueryRequest(
+                query=q.tolist(),
                 limit=n,
-                with_payload=grpc.WithPayloadSelector(enable=False),
-                with_vectors=grpc.WithVectorsSelector(enable=False),
-                params=grpc.SearchParams(
+                with_payload=False,
+                with_vector=False,
+                params=SearchParams(
                     hnsw_ef=self._search_params["hnsw_ef"],
                     quantization=quantization_search_params,
                 ),
@@ -177,21 +170,18 @@ class Qdrant(BaseANN):
 
         self.batch_results = []
 
-        for request_batch in iter_batches(search_queries, BATCH_SIZE):
+        for request_batch in iter_batches(search_queries, QUERY_BATCH_SIZE):
             start = time()
-            grpc_res: grpc.SearchBatchResponse = self._client.grpc_points.SearchBatch(
-                grpc.SearchBatchPoints(
-                    collection_name=self._collection_name,
-                    search_points=request_batch,
-                    read_consistency=None,
-                ),
+            results = self._client.query_batch_points(
+                collection_name=self._collection_name,
+                requests=request_batch,
                 timeout=TIMEOUT,
             )
             duration = time() - start
             self.batch_latencies.extend([duration / len(request_batch)] * len(request_batch))
 
-            for r in grpc_res.result:
-                self.batch_results.append([hit.id.num for hit in r.result])
+            for r in results:
+                self.batch_results.append([point.id for point in r.points])
 
     def get_batch_results(self):
         return self.batch_results
