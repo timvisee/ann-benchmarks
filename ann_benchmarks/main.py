@@ -59,7 +59,7 @@ def run_worker(cpu: int, mem_limit: int, args: argparse.Namespace, queue: multip
     Args:
         cpu (int): The CPU number to be used in the execution.
         mem_limit (int): The memory to be used in the execution.
-        args (argparse.Namespace): User provided arguments for running workers. 
+        args (argparse.Namespace): User provided arguments for running workers.
         queue (multiprocessing.Queue): The multiprocessing queue that contains the algorithm definitions.
 
     Returns:
@@ -71,7 +71,7 @@ def run_worker(cpu: int, mem_limit: int, args: argparse.Namespace, queue: multip
             run(definition, args.dataset, args.count, args.runs, args.batch)
         else:
             cpu_limit = str(cpu) if not args.batch else f"0-{multiprocessing.cpu_count() - 1}"
-            
+
             run_docker(definition, args.dataset, args.count, args.runs, args.timeout, args.batch, cpu_limit, mem_limit)
 
 
