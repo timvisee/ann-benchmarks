@@ -1,5 +1,6 @@
 from time import sleep, time
 from typing import Iterable, List, Any
+import multiprocessing
 
 import numpy as np
 from qdrant_client import QdrantClient
@@ -24,7 +25,10 @@ from ..base.module import BaseANN
 
 TIMEOUT = 30
 BATCH_SIZE = 128
-QUERY_BATCH_SIZE = 24 * 10
+# In a single batch query request, queries may be splitted across CPU cores per
+# batch of 10.
+# See: <https://github.com/qdrant/qdrant/pull/6326>
+QUERY_BATCH_SIZE = max(multiprocessing.cpu_count() * 10, BATCH_SIZE)
 
 
 class Qdrant(BaseANN):
